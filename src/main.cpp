@@ -1,55 +1,46 @@
 #include <Arduino.h>
-#include <ESP8266WiFi.h>
-#include <ESP8266HTTPClient.h>
-#include <FirebaseArduino.h>
-#include "Creds.h"
+#include <ESP8266WiFi.h> // required by Firebase & WiFiManager
+#include <ESP8266WebServer.h> // required by WiFiManager
+#include <DNSServer.h> // required by WiFiManager
+#include <WiFiManager.h> // https://github.com/kentaylor/WiFiManager
+#include <ESP8266HTTPClient.h> // required by Firebase
+#include <FirebaseArduino.h> // Firebase for Arduino library
+#include "Creds.h" // store Firebase login credentials
 
-#include <Wire.h>
-#include "SSD1306Wire.h"
-#include <Adafruit_Sensor.h>
-#include <DHT.h>
-#include <DHT_U.h>
+#include <Wire.h> // required by OLED LCD
+#include "SSD1306Wire.h" // OLED LCD library
+#include <Adafruit_Sensor.h> // required by OLED LCD
+#include <DHT.h> // Digital Humidity & Temperature sensor library
+#include <DHT_U.h> // Digital Humidity & Temperature sensor library
 
+//---Pinout & Configurations---//
 #define DHTPIN D5
 #define DHTTYPE DHT11
+#define DHT_INTERVAL 2000 //DHT capture interval of 2 seconds
+#define DHT_UPDATE_INTERVAL 15 //update database every 15 data capture, approx. (DHT_update_count * (DHT_INTERVAL/1000)) seconds
 
-SSD1306Wire  display(0x3c, D2, D1);
+SSD1306Wire display(0x3c, D2, D1); // D2:SDA, D1:SCL
 DHT_Unified dht(DHTPIN, DHTTYPE);
 
-int led_lolin = D4; // Lolin board can't use LED_BUILTIN definition
+int led_lolin = D4; // Lolin board can't use LED_BUILTIN definition, built-in led located @ D4
 int powerAC = D6;
 int bulb = D7;
 int led_powerAC = D8;
 int led_state = 1, power_state = 1;
-int count_delay = 0; //delay for getting temp & humid data
-int count_delay_update = 0; //delay for updating database
+
+unsigned long DHT_startAt = 0; //DHT time-stamp
+int DHT_count = 0; //count number of times data captured
 float temp = 0.0;
 float humid = 0.0;
 
-void connectToWiFi(){
-  delay(10);
-  Serial.println();
-  Serial.println();
-  Serial.print("Connecting to ");
-  Serial.print(SSID);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(SSID, PASSWORD);
-  while(WiFi.status() != WL_CONNECTED){
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("");
-  Serial.print("Wifi connected to ");
-  Serial.println(SSID);
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
-  Serial.println("");
-}
+//---End of Pinout & Configurations---//
 
 void setup_init_state() {
   digitalWrite(bulb, Firebase.getInt("/LedStatus"));
   digitalWrite(powerAC, Firebase.getInt("/PowerAC"));
   digitalWrite(led_powerAC, (Firebase.getInt("/PowerAC"))^1);
+  led_state = Firebase.getInt("/LedStatus");
+  power_state = Firebase.getInt("/PowerAC");
 }
 
 void drawPeripheralStatus(int led_state, int power_state, float temp, float humid) {
@@ -76,27 +67,69 @@ void setup() {
   digitalWrite(led_lolin, HIGH); //turn off until init ready
   digitalWrite(powerAC, HIGH); //turn off at start
   digitalWrite(led_powerAC, LOW); //turn off at start
-  
-  //pinMode(LED_BUILTIN, OUTPUT);
 
   display.init();
   display.flipScreenVertically();
   display.clear();
   display.setFont(ArialMT_Plain_16);
   display.setTextAlignment(TEXT_ALIGN_LEFT);
-  display.drawString(0, 16, "Initializing...");
+  display.drawString(0, 16, "Connecting...");
   display.display();
 
   Serial.begin(9600);
   
-  connectToWiFi();
+  //---Configure WiFi---//
+  Serial.println("\n Starting");
+  unsigned long startedAt = millis();
+  Serial.println("Opening configuration portal");
+  
+  WiFiManager wifiManager;
+  //wifiManager.resetSettings(); //uncomment this to erase the saved connection details
+
+  //sets timeout in seconds until configuration portal gets turned off.
+  //If not specified device will remain in configuration mode until switched off via webserver.
+  if (WiFi.SSID()!="") wifiManager.setConfigPortalTimeout(60); //If no access point name has been previously entered disable timeout.
+
+  //it starts an access point and goes into a blocking loop awaiting configuration
+  if (!wifiManager.startConfigPortal("bulb@saur","compeng2019"))  //Delete these two parameters if you do not want a WiFi password on your configuration access point
+  {
+     Serial.println("Not connected to WiFi but continuing anyway.");
+  } 
+  else 
+  {
+     //if you get here you have connected to the WiFi
+     Serial.println("connected...yeey :)");
+  }
+
+  Serial.print("After waiting ");
+  int connRes = WiFi.waitForConnectResult();
+  float waited = (millis()- startedAt);
+  Serial.print(waited/1000);
+  Serial.print(" secs in setup() connection result is ");
+  Serial.println(connRes);
+  if (WiFi.status()!=WL_CONNECTED)
+  {
+      Serial.println("failed to connect, finishing setup anyway");
+  } 
+  else
+  {
+    Serial.print("local ip: ");
+    Serial.println(WiFi.localIP());
+  }
+  //---End of WiFi Configuration---//
+
+  display.drawString(0, 16, "Initializing...");
+  display.display();
 
   Firebase.begin(FIREBASE_HOST, FIREBASE_AUTH);
   
   setup_init_state();
 
   dht.begin();
+  
   digitalWrite(led_lolin, LOW); //turn on, indicates init ready
+
+  DHT_startAt = millis(); //start counting for the next DHT sensor capture
 
   Firebase.stream("/"); //monitor all activity (LedStatus and PowerAC)
 }
@@ -127,20 +160,20 @@ void loop() {
 
       if(path == "/LedStatus") {
         if(!data) {
-          digitalWrite(bulb, LOW);
+          digitalWrite(bulb, LOW);  //bulb ON
         }
         else {
-          digitalWrite(bulb, HIGH);
+          digitalWrite(bulb, HIGH); //bulb off
         }
         led_state = data;
       }
       else if(path == "/PowerAC") {
         if(!data) {
-          digitalWrite(powerAC, LOW);
+          digitalWrite(powerAC, LOW); //power ON
           digitalWrite(led_powerAC, HIGH);
         }
         else {
-          digitalWrite(powerAC, HIGH);
+          digitalWrite(powerAC, HIGH); //power OFF
           digitalWrite(led_powerAC, LOW);
         }
         power_state = data;
@@ -150,8 +183,7 @@ void loop() {
 
   }
 
-  count_delay++;
-  if(count_delay >= 200)
+  if(DHT_startAt - millis() >= DHT_INTERVAL)
   {
     sensors_event_t event;
 
@@ -177,15 +209,15 @@ void loop() {
       humid = event.relative_humidity;
     }
 
-    if(count_delay_update >= 5) {  //update to database approx every 10 seconds
+    if(DHT_count >= DHT_UPDATE_INTERVAL) { 
       //Firebase.setFloat("/Temperature", temp);
       //Firebase.setFloat("/Humidity", humid);
-      count_delay_update = 0;
+      DHT_count = 0; //restart count from 0
     }
     else
-      count_delay_update++;
+      DHT_count++;
 
-    count_delay = 0;
+    DHT_startAt = millis();
     Firebase.stream("/"); //monitor all activity (LedStatus and PowerAC)
   }
 
