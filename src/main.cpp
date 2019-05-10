@@ -22,7 +22,7 @@
 SSD1306Wire display(0x3c, D2, D1); // D2:SDA, D1:SCL
 DHT_Unified dht(DHTPIN, DHTTYPE);
 
-int led_lolin = D4; // Lolin board can't use LED_BUILTIN definition, built-in led located @ D4
+int led_backlight = D4; // built-in led located @ D4 for lolin board, also serve as backlight LED for demo_bulb
 int powerAC = D6;
 int bulb = D7;
 int led_powerAC = D8;
@@ -59,12 +59,12 @@ void drawPeripheralStatus(int led_state, int power_state, float temp, float humi
 
 void setup() {
   pinMode(bulb, OUTPUT); //active low
-  pinMode(led_lolin, OUTPUT); //active low
+  pinMode(led_backlight, OUTPUT); //built-in = active low, backlight = active high
   pinMode(powerAC, OUTPUT); //active low
   pinMode(led_powerAC, OUTPUT); //active high
 
   digitalWrite(bulb, HIGH); //turn off at start
-  digitalWrite(led_lolin, HIGH); //turn off until init ready
+  digitalWrite(led_backlight, LOW); //turn off backlight at start
   digitalWrite(powerAC, HIGH); //turn off at start
   digitalWrite(led_powerAC, LOW); //turn off at start
 
@@ -82,13 +82,13 @@ void setup() {
   Serial.println("\n Starting");
   unsigned long startedAt = millis();
   Serial.println("Opening configuration portal");
-  
+
   WiFiManager wifiManager;
   //wifiManager.resetSettings(); //uncomment this to erase the saved connection details
 
   //sets timeout in seconds until configuration portal gets turned off.
   //If not specified device will remain in configuration mode until switched off via webserver.
-  if (WiFi.SSID()!="") wifiManager.setConfigPortalTimeout(60); //If no access point name has been previously entered disable timeout.
+  if (WiFi.SSID()!="") wifiManager.setConfigPortalTimeout(10); //If no access point name has been previously entered disable timeout.
 
   //it starts an access point and goes into a blocking loop awaiting configuration
   if (!wifiManager.startConfigPortal("bulb@saur","compeng2019"))  //Delete these two parameters if you do not want a WiFi password on your configuration access point
@@ -101,6 +101,11 @@ void setup() {
      Serial.println("connected...yeey :)");
   }
 
+  digitalWrite(led_backlight, HIGH); //turn on backlight, indicates exit config mode
+
+  // For some unknown reason webserver can only be started once per boot up 
+  // so webserver can not be used again in the sketch.
+
   Serial.print("After waiting ");
   int connRes = WiFi.waitForConnectResult();
   float waited = (millis()- startedAt);
@@ -109,7 +114,17 @@ void setup() {
   Serial.println(connRes);
   if (WiFi.status()!=WL_CONNECTED)
   {
-      Serial.println("failed to connect, finishing setup anyway");
+    Serial.println("failed to connect, finishing setup anyway");
+    display.clear();
+    display.drawStringMaxWidth(0, 0, 128, "Failed to connect... Please restart...");
+    display.display();
+    for(;;)
+    {
+      digitalWrite(led_backlight, LOW); //turn on backlight, indicates exit config mode
+      delay(200);
+      digitalWrite(led_backlight, HIGH); //turn on backlight, indicates exit config mode
+      delay(200);
+    }
   } 
   else
   {
@@ -118,20 +133,24 @@ void setup() {
   }
   //---End of WiFi Configuration---//
 
+  Serial.println("\nInitializing...");
+  display.clear();
   display.drawString(0, 16, "Initializing...");
   display.display();
 
+  Serial.println("\nInitializing Firebase...");
   Firebase.begin(FIREBASE_HOST, FIREBASE_AUTH);
-  
-  setup_init_state();
 
+  Serial.println("\nSetting up initial state...");
+  setup_init_state(); // must be called after firebase begin
+
+  Serial.println("\nInitializing DHT sensor...");
   dht.begin();
-  
-  digitalWrite(led_lolin, LOW); //turn on, indicates init ready
 
   DHT_startAt = millis(); //start counting for the next DHT sensor capture
 
   Firebase.stream("/"); //monitor all activity (LedStatus and PowerAC)
+  Serial.println("Initializing Complete");
 }
 
 void loop() {
@@ -183,7 +202,7 @@ void loop() {
 
   }
 
-  if(DHT_startAt - millis() >= DHT_INTERVAL)
+  if(millis() - DHT_startAt >= DHT_INTERVAL)
   {
     sensors_event_t event;
 
